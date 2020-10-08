@@ -1,16 +1,21 @@
+# Brute-force search algorithm for the optimisation of buffer tank nodal location
+# Written by Bowen Fan, UCL
+
 from epynet import Network
 import numpy as np
 import PySimpleGUI as sg
 import pandas as pd
 
 score_index_counter = 0
+tank_elev_array = []
 
 
 def solve_and_return_pressures(num_junctions):
+    # function to calculate the pressure of every node at any timestep
+
+    # call EPANET to load the network
+
     network = Network(inp_file)
-
-    # network.load_network()
-
     network.ep.ENopen(inp_file)
 
     network.ep.ENopenH()
@@ -22,6 +27,7 @@ def solve_and_return_pressures(num_junctions):
     # big array of all pressures for all junctions at all timesteps
     perm_pressure_array = np.empty((num_junctions, 0))
 
+    # solve for all timesteps and store each node's pressure at each timestep in an array
     runtime = 0
 
     while network.ep.ENnextH() > 0:
@@ -38,7 +44,6 @@ def solve_and_return_pressures(num_junctions):
         temp_pressure_array = []
 
     network.ep.ENcloseH()
-
     network.ep.ENdeleteproject()
 
     return perm_pressure_array
@@ -65,17 +70,18 @@ def score_pressure_array(perm_pressure_array):
 
     score_index_counter += 1
 
-
     return min_average_pressure
 
 
 def average_initial_pressures(perm_pressure_array):
+    # simple function to average all nodal pressures in the network
     avg_pressure_at_each_junc = np.mean(perm_pressure_array, axis=1)
 
     return avg_pressure_at_each_junc
 
 
 def add_tank_get_score(num_junctions, avg_initial_pressure_at_each_junc):
+    global tank_elev_array
     network = Network(inp_file)
 
     junc_elev_array = []
@@ -84,14 +90,20 @@ def add_tank_get_score(num_junctions, avg_initial_pressure_at_each_junc):
 
     score_array = []
 
+    # this loop add a tank to Node 1, calculate the peak-demand average pressure, stores it, and deletes the tank
+    # it then adds a tank to Node 2 and repeats until all nodal locations are scored
+
     for junction in range(num_junctions):
         junc_elev_array.append(network.ep.ENgetnodevalue(junction + 1, 0))
         junc_x_y_array.append(network.ep.ENgetcoord(junction + 1))
         junc_id_array.append(network.ep.ENgetnodeid(junction + 1))
 
+        optimum_elevation = junc_elev_array[junction] + avg_initial_pressure_at_each_junc[junction]
+
+        tank_elev_array.append(optimum_elevation)
+
         network.add_tank(uid='balancing_tank', x=junc_x_y_array[junction][0], y=junc_x_y_array[junction][1],
-                         elevation=junc_elev_array[junction] + avg_initial_pressure_at_each_junc[junction],
-                         diameter=100, maxlevel=1000, minlevel=0, tanklevel=0)
+                         elevation=optimum_elevation, diameter=100, maxlevel=1000, minlevel=0, tanklevel=0)
 
         network.add_pipe(uid='balancing_tank_pipe', from_node=junc_id_array[junction],
                          to_node='balancing_tank', diameter=1000, length=10, roughness=1E9, check_valve=False)
@@ -116,7 +128,6 @@ def main():
     network = Network(inp_file)
 
     num_junctions = 0
-
     num_nodes = network.ep.ENgetcount(0)
 
     for node in range(num_nodes):
@@ -127,8 +138,6 @@ def main():
 
     avg_initial_pressure_at_each_junc = average_initial_pressures(solve_and_return_pressures(num_junctions))
 
-    # print("Time-averaged initial pressure at each junction: ", avg_initial_pressure_at_each_junc)
-
     scores = add_tank_get_score(num_junctions, avg_initial_pressure_at_each_junc)
 
     best_junction = network.ep.ENgetnodeid(int(np.argmax(scores) + 1))
@@ -138,31 +147,31 @@ def main():
     for junction in range(num_junctions):
         junction_ids.append(network.ep.ENgetnodeid(junction + 1))
 
-    print("\nBest junction (ID): ", best_junction, "\nMin avg network pressure: ", np.max(scores))
+    print("\nIndex of best junction: ", np.argmax(scores) + 1)
+
+    print("ID of best junction: ", best_junction, "\nMin avg network pressure with optimized tank: ", np.max(scores))
 
     original_score = score_pressure_array(solve_and_return_pressures(num_junctions))
 
     print("\nMin avg network pressure without buffer tank: ", original_score)
 
-    score_dataframe = pd.DataFrame({"Junction ID":junction_ids, "Min Avg Network Pressure":scores})
+    score_dataframe = pd.DataFrame({"Junction ID":junction_ids,
+                                    "Min Avg Network Pressure":scores,
+                                    "Tank Elevation":tank_elev_array})
+
     score_dataframe.index = score_dataframe.index + 1
     score_dataframe.index.name = "Junction Index"
-
-    # score_dataframe.columns = ["Min Avg Network Pressure"]
 
     sorted_scores = score_dataframe.sort_values("Min Avg Network Pressure", ascending=False)
 
     print("\nTank locations sorted by minimum average network pressure:\n")
-
     print(sorted_scores)
 
     print("\nSaving CSV...")
-
     sorted_scores.to_csv("Optimal_Location_List.csv")
 
 
 # GUI window using PySimpleGUI
-
 
 layout = [[sg.Text('EPANET network .inp file:', size=(21, 1)),
            sg.Input(key='inp_filepath',
